@@ -3,10 +3,11 @@
 version: '3'
 
 vars:
-  GREETING: Hello, World!
 
 tasks:
-  default:
+  build:
     cmds:
-      - echo "{{.GREETING}}"
+      - cargo build --release
+      - mv target/release/raft .
+      - mv raft 3700kvstore
     silent: true
