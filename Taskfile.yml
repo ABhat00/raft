@@ -5,9 +5,29 @@ version: '3'
 vars:
 
 tasks:
-  build:
+  all:
     cmds:
-      - cargo build --release
-      - mv target/release/raft .
-      - mv raft 3700kvstore
+      - task: clean
+      - task: build:debug
+      - task: publish
+  build:debug:
+    cmds:
+      - cargo build --target=x86_64-unknown-linux-musl
+      - mv target/x86_64-unknown-linux-musl/debug/raft .
+      - task: move-and-format
     silent: true
+  build:release:
+    cmds:
+      - cargo build --release --target=x86_64-unknown-linux-musl
+      - mv target/x86_64-unknown-linux-musl/release/raft .
+      - task: move-and-format
+    silent: true
+  move-and-format:
+      - mv raft 3700kvstore
+  clean:
+    cmds: 
+      - cargo clean
+      - rm 3700kvstore
+  publish:
+    cmds:
+      - scp 3700kvstore ameyabhat@login.ccs.neu.edu:~/networks/raft
