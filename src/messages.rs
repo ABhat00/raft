@@ -12,6 +12,12 @@ pub struct Body {
     msg_type: Recv,
 }
 
+impl Body {
+    pub fn mtype(&self) -> &Recv {
+        return &self.msg_type;
+    }
+}
+
 // Recv denotes the collection of messages that a replica should receive and
 // be expected to handle. New message
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

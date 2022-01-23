@@ -20,6 +20,10 @@ async fn main() -> Result<()> {
         let recv_msg: messages::Body = m.read().await?;
         println!("{:?}", recv_msg);
 
+        match recv_msg.mtype() {
+            messages::Recv::Put { key, value } => println!("put"),
+            messages::Recv::Get { key } => println!("get"),
+        }
         break;
     }
 
