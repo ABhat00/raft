@@ -1,6 +1,9 @@
 use crate::messages;
 use rand::{prelude::thread_rng, Rng};
-use std::{collections::HashMap, io::Error};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Error,
+};
 use tokio::io::{self};
 use tokio_seqpacket::UnixSeqpacket;
 
@@ -8,12 +11,16 @@ pub struct Replica<'a> {
     committed_values: HashMap<String, String>,
     id: &'a String,
     sock: UnixSeqpacket,
-    colleagues: &'a Vec<String>,
-    state: ReplicaState,
+    pub colleagues: &'a Vec<String>,
+    pub state: ReplicaState,
     leader: &'a str,
-    term: u16,
+    pub term: u16,
     log: Vec<LogEntry<'a>>,
     pub election_timeout: f32,
+    // if an entry exists in the vote_history, then this replica has
+    // already voted for someone in that term
+    pub vote_history: HashSet<u16>,
+    pub vote_tally: HashMap<u16, u16>,
 }
 
 pub struct LogEntry<'a> {
@@ -23,7 +30,7 @@ pub struct LogEntry<'a> {
 }
 
 #[derive(PartialEq)]
-enum ReplicaState {
+pub enum ReplicaState {
     Follower,
     Leader,
     Candidate,
@@ -38,6 +45,8 @@ pub async fn new<'a>(
 
     let replica = match conn_attempt {
         Ok(sock) => Ok(Replica {
+            vote_tally: HashMap::new(),
+            vote_history: HashSet::new(),
             election_timeout: rng.gen_range(0.15..0.30),
             log: Vec::new(),
             committed_values: HashMap::new(),
@@ -64,7 +73,7 @@ impl<'a> Replica<'a> {
             src: self.id.to_string(),
             dst: dst.to_string(),
             leader: self.leader.to_string(),
-            id: mid.to_string(),
+            mid: mid.to_string(),
         }
     }
     pub async fn read(&self) -> Result<messages::Recv, Error> {
@@ -84,6 +93,34 @@ impl<'a> Replica<'a> {
         let msg: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(&messages::Send {
             body: self.build_body(dst, mid),
             options: messages::SendOptions::Fail,
+        });
+
+        let mut buf = match msg {
+            Ok(b) => b,
+            Err(e) => return Err(io::Error::from(e)),
+        };
+
+        let success = self.sock.send(&mut buf).await;
+
+        match success {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn request_vote(&self) -> Result<(), Error> {
+        let last_log_term = match self.log.last() {
+            Some(entry) => entry.term,
+            None => 0,
+        };
+
+        let msg: Result<Vec<u8>, serde_json::Erorr> = serde_json::to_vec(&messages::Send {
+            body: self.build_body("dst", "mid"),
+            options: messages::SendOptions::RequestVote {
+                term: self.term,
+                last_log_index: self.log.len(),
+                last_log_term: last_log_term,
+            },
         });
 
         let mut buf = match msg {
@@ -146,13 +183,30 @@ impl<'a> Replica<'a> {
         }
     }
 
+    pub fn vote(&self, term: u16) -> Result<(), Error> {
+        todo!("Send a vote")
+    }
+    // This tells us if the other log is at least as long as ours
     pub fn as_least_as_long(&self, other_last_log_index: u16, other_last_log_term: u16) -> bool {
+        /*
+            Per the RAFT paper
+            "If the logs have last entries with different terms, then
+            the log with the later term is more up-to-date. If the logs
+            end with the same term, then whichever log is longer is
+            more up-to-date."
+        */
         let last_log_entry = self.log.last();
 
         match last_log_entry {
             Some(entry) => {
-                entry.term <= other_last_log_term && self.log.len() <= other_last_log_index
+                if entry.term != other_last_log_term {
+                    return entry.term <= other_last_log_term;
+                }
+
+                return self.log.len() <= other_last_log_index;
             }
+            // If our log is empty, then our last log index is 0, which means
+            // everyone is at least as long as us
             None => true,
         }
     }

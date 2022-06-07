@@ -24,7 +24,7 @@ pub struct Body {
     pub dst: String,
     pub leader: String,
     #[serde(rename = "MID")]
-    pub id: String,
+    pub mid: String,
 }
 
 // RecvOptions denotes the collection of messages that a replica should receive and
@@ -40,11 +40,13 @@ pub enum RecvOptions {
     // last_log_term is the highest term that a replica has in it's log
     #[serde{rename = "request_vote"}]
     RequestVote {
-        id: String,
+        replica_id: String,
         term: u16,
         last_log_index: u16,
         last_log_term: u16,
     },
+    #[serde{rename = "vote"}]
+    Vote { replica_id: String, term: u16 },
 }
 
 // SendOptions is the collection of messages that a replica can send
@@ -63,11 +65,12 @@ pub enum SendOptions {
     // last_log_term is the highest term that a replica has in it's log
     #[serde{rename = "request_vote"}]
     RequestVote {
-        id: String,
         term: u16,
         last_log_index: u16,
         last_log_term: u16,
     },
+    #[serde{rename = "vote"}]
+    Vote { term: u16 },
 }
 
 // This test only runs on Unix machines - UnixSeqPacket won't compile
