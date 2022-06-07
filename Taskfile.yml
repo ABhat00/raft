@@ -11,7 +11,10 @@ tasks:
       - task: publish
   test:
     cmds:
-      - cargo test --target=x86_64-unknown-linux-musl
+      - ssh ameyabhat@login.ccs.neu.edu "cd ~/networks/raft && cargo test --target=x86_64-unknown-linux-musl"
+  test-remote:
+    cmds:
+      - ssh ameyabhat@login.ccs.neu.edu "cd ~/networks/raft && ./run.py tests/{{.CLI_ARGS}}.json"
   check:
     cmds:
       - cargo check --target=x86_64-unknown-linux-musl

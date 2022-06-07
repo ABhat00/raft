@@ -1,37 +1,83 @@
+use std::char::DecodeUtf16;
+
 use serde::{Deserialize, Serialize};
-use std::io::Result;
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct Send {
+    #[serde(flatten)]
+    pub body: Body,
+    #[serde(flatten)]
+    pub options: SendOptions,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct Recv {
+    #[serde(flatten)]
+    pub body: Body,
+    #[serde(flatten)]
+    pub options: RecvOptions,
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Body {
-    src: String,
-    dst: String,
-    leader: String,
+    pub src: String,
+    pub dst: String,
+    pub leader: String,
     #[serde(rename = "MID")]
-    msg_id: String,
-    #[serde(flatten)]
-    msg_type: Recv,
+    pub id: String,
 }
 
-impl Body {
-    pub fn mtype(&self) -> &Recv {
-        return &self.msg_type;
-    }
-}
-
-// Recv denotes the collection of messages that a replica should receive and
-// be expected to handle. New message
+// RecvOptions denotes the collection of messages that a replica should receive and
+// be expected to handle.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(tag = "type")]
-pub enum Recv {
+pub enum RecvOptions {
     #[serde(rename = "put")]
     Put { key: String, value: String },
     #[serde(rename = "get")]
     Get { key: String },
+    // last_log_index is the length of the log
+    // last_log_term is the highest term that a replica has in it's log
+    #[serde{rename = "request_vote"}]
+    RequestVote {
+        id: String,
+        term: u16,
+        last_log_index: u16,
+        last_log_term: u16,
+    },
 }
+
+// SendOptions is the collection of messages that a replica can send
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(tag = "type")]
+pub enum SendOptions {
+    #[serde(rename = "fail")]
+    Fail,
+    #[serde(rename = "ok")]
+    WriteOK,
+    #[serde(rename = "ok")]
+    ReadOk { value: String },
+    #[serde(rename = "redirect")]
+    Redirect,
+    // last_log_index is the length of the log
+    // last_log_term is the highest term that a replica has in it's log
+    #[serde{rename = "request_vote"}]
+    RequestVote {
+        id: String,
+        term: u16,
+        last_log_index: u16,
+        last_log_term: u16,
+    },
+}
+
+// This test only runs on Unix machines - UnixSeqPacket won't compile
+// on machines w/o SCTP support
 #[cfg(test)]
 mod tests {
 
     use serde_json::json;
+
+    use crate::messages;
     #[test]
     fn test_ser_de() -> Result<()> {
         let put_msg = json!({
@@ -53,7 +99,7 @@ mod tests {
             "key": "a key",
         });
 
-        let deserialized_put = Body {
+        let deserialized_put = Recvs {
             src: "0001".to_string(),
             dst: "0002".to_string(),
             leader: "FFFF".to_string(),
