@@ -38,15 +38,14 @@ pub enum RecvOptions {
     Get { key: String },
     // last_log_index is the length of the log
     // last_log_term is the highest term that a replica has in it's log
-    #[serde{rename = "request_vote"}]
+    #[serde(rename = "request_vote")]
     RequestVote {
-        replica_id: String,
         term: u16,
         last_log_index: u16,
         last_log_term: u16,
     },
-    #[serde{rename = "vote"}]
-    Vote { replica_id: String, term: u16 },
+    #[serde(rename = "vote")]
+    Vote { term: u16 },
 }
 
 // SendOptions is the collection of messages that a replica can send
@@ -63,13 +62,13 @@ pub enum SendOptions {
     Redirect,
     // last_log_index is the length of the log
     // last_log_term is the highest term that a replica has in it's log
-    #[serde{rename = "request_vote"}]
+    #[serde(rename = "request_vote")]
     RequestVote {
         term: u16,
         last_log_index: u16,
         last_log_term: u16,
     },
-    #[serde{rename = "vote"}]
+    #[serde(rename = "vote")]
     Vote { term: u16 },
 }
 

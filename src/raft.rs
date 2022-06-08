@@ -16,7 +16,7 @@ pub struct Replica<'a> {
     leader: &'a str,
     pub term: u16,
     log: Vec<LogEntry<'a>>,
-    pub election_timeout: f32,
+    pub election_timeout: u64,
     // if an entry exists in the vote_history, then this replica has
     // already voted for someone in that term
     pub vote_history: HashSet<u16>,
@@ -47,7 +47,8 @@ pub async fn new<'a>(
         Ok(sock) => Ok(Replica {
             vote_tally: HashMap::new(),
             vote_history: HashSet::new(),
-            election_timeout: rng.gen_range(0.15..0.30),
+            // election timeout in milliseconds
+            election_timeout: (rng.gen_range(0.15..0.30) * 100.0) as u64,
             log: Vec::new(),
             committed_values: HashMap::new(),
             id: replica_id,
@@ -114,11 +115,11 @@ impl<'a> Replica<'a> {
             None => 0,
         };
 
-        let msg: Result<Vec<u8>, serde_json::Erorr> = serde_json::to_vec(&messages::Send {
+        let msg: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(&messages::Send {
             body: self.build_body("dst", "mid"),
             options: messages::SendOptions::RequestVote {
                 term: self.term,
-                last_log_index: self.log.len(),
+                last_log_index: self.log.len() as u16,
                 last_log_term: last_log_term,
             },
         });
@@ -183,7 +184,7 @@ impl<'a> Replica<'a> {
         }
     }
 
-    pub fn vote(&self, term: u16) -> Result<(), Error> {
+    pub async fn vote(&self, term: u16) -> Result<(), Error> {
         todo!("Send a vote")
     }
     // This tells us if the other log is at least as long as ours
@@ -203,7 +204,7 @@ impl<'a> Replica<'a> {
                     return entry.term <= other_last_log_term;
                 }
 
-                return self.log.len() <= other_last_log_index;
+                return self.log.len() <= other_last_log_index.into();
             }
             // If our log is empty, then our last log index is 0, which means
             // everyone is at least as long as us

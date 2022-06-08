@@ -1,4 +1,5 @@
 use clap::Parser;
+use core::num;
 use raft::{Replica, ReplicaState};
 use std::io::Result;
 use std::time::{Duration, SystemTime};
@@ -72,7 +73,6 @@ async fn main() -> Result<()> {
                         }
                     }
                     messages::RecvOptions::RequestVote {
-                        replica_id: id,
                         term,
                         last_log_index,
                         last_log_term,
@@ -84,14 +84,15 @@ async fn main() -> Result<()> {
                             m.vote(term).await?
                         }
                     }
-                    messages::RecvOptions::Vote { replica_id, term } => {
+                    messages::RecvOptions::Vote { term } => {
                         if matches!(m.state, ReplicaState::Candidate) {
-                            // 1. tally the vote
-                            let num_votes_in_term = m.vote_tally.entry(m.term);
-                            *num_votes_in_term += 1;
+                            // 1. tally the vote (this key should already exist in the map because I voted for myself)
+                            let num_votes_in_term = m.vote_tally.entry(term).or_insert(1);
 
+                            let required_vote_threshold: u16 =
+                                ((m.colleagues.len() / 2) + 1).try_into().unwrap();
                             // 2. see if we're the leader yet
-                            if num_votes_in_term >= (m.colleagues.len() / 2) + 1 {
+                            if *num_votes_in_term >= required_vote_threshold {
                                 // 3. Change our status to leader
                                 m.state = ReplicaState::Leader;
 
@@ -102,15 +103,21 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            Err(err) => {
+            Err(_) => {
                 if m.is_leader() {
                     // send heartbeat
                     todo!("send heartbeat")
                 } else {
                     // This is where we start a leader election
+                    // set my state to candidate
                     m.state = ReplicaState::Candidate;
+                    // increment my term
+                    m.term += 1;
+                    // vote for myself
                     m.vote_tally.insert(m.term, 1);
+                    // mark that I have voted in this term
                     m.vote_history.insert(m.term);
+                    // requeset votes from replicas
                     m.request_vote().await?
                 }
             }
