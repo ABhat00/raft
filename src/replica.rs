@@ -102,7 +102,7 @@ impl<'a> Replica<'a> {
         };
     }
 
-    pub async fn start_election(&self) -> () {
+    pub async fn start_election(&mut self) -> () {
         // This is where we start a leader election
         // set my state to candidate
         self.state = ReplicaState::Candidate;
@@ -113,26 +113,15 @@ impl<'a> Replica<'a> {
         // mark that I have voted in this term
         self.vote_history.insert(self.term);
         // requeset votes from replicas
-        return self.request_vote().await?;
+        self.request_vote().await;
     }
 
     pub async fn send_fail(&self, dst: &str, mid: &str) -> Result<(), Error> {
-        let msg: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(&messages::Send {
+        self.send_msg(&messages::Send {
             body: self.build_body(dst, mid),
             options: messages::SendOptions::Fail,
-        });
-
-        let mut buf = match msg {
-            Ok(b) => b,
-            Err(e) => return Err(io::Error::from(e)),
-        };
-
-        let success = self.sock.send(&mut buf).await;
-
-        match success {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        })
+        .await
     }
 
     pub async fn request_vote(&self) -> Result<(), Error> {
@@ -141,45 +130,23 @@ impl<'a> Replica<'a> {
             None => 0,
         };
 
-        let msg: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(&messages::Send {
-            body: self.build_body("dst", "mid"),
+        self.send_msg(&messages::Send {
+            body: self.build_body("FFFF", "mid"),
             options: messages::SendOptions::RequestVote {
                 term: self.term,
                 last_log_index: self.log.len() as u16,
                 last_log_term: last_log_term,
             },
-        });
-
-        let mut buf = match msg {
-            Ok(b) => b,
-            Err(e) => return Err(io::Error::from(e)),
-        };
-
-        let success = self.sock.send(&mut buf).await;
-
-        match success {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        })
+        .await
     }
 
     pub async fn redirect(&self, mid: &str) -> Result<(), Error> {
-        let msg: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(&messages::Send {
+        self.send_msg(&messages::Send {
             body: self.build_body(self.leader, mid),
             options: messages::SendOptions::Redirect,
-        });
-
-        let mut buf = match msg {
-            Ok(b) => b,
-            Err(e) => return Err(io::Error::from(e)),
-        };
-
-        let success = self.sock.send(&mut buf).await;
-
-        match success {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        })
+        .await
     }
 
     pub async fn get(&self, key: &str, dst: &str, mid: &str) -> Result<(), Error> {
@@ -187,31 +154,24 @@ impl<'a> Replica<'a> {
 
         match lookup {
             Some(v) => {
-                let msg = serde_json::to_vec(&messages::Send {
+                self.send_msg(&messages::Send {
                     body: self.build_body(dst, mid),
                     options: messages::SendOptions::ReadOk {
                         value: v.to_string(),
                     },
-                });
-
-                let mut buf = match msg {
-                    Ok(b) => b,
-                    Err(e) => return Err(io::Error::from(e)),
-                };
-
-                let success = self.sock.send(&mut buf).await;
-
-                match success {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e),
-                }
+                })
+                .await
             }
             None => self.send_fail(dst, mid).await,
         }
     }
 
-    pub async fn vote(&self, term: u16) -> Result<(), Error> {
-        todo!("Send a vote")
+    pub async fn vote(&self, dst: &str, term: u16) -> Result<(), Error> {
+        self.send_msg(&messages::Send {
+            body: self.build_body(dst, "mid"),
+            options: messages::SendOptions::Vote { term },
+        })
+        .await
     }
 
     // This tells us if the other log is at least as long as ours
@@ -241,5 +201,22 @@ impl<'a> Replica<'a> {
 
     pub fn election_timeout_elapsed(&self) -> bool {
         return SystemTime::now() - self.time_of_last_heartbeat > self.election_timeout;
+    }
+
+    // abstract away sending messages
+    async fn send_msg(&self, msg: &messages::Send) -> Result<(), Error> {
+        let as_bytes: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(msg);
+
+        let mut buf = match as_bytes {
+            Ok(b) => b,
+            Err(e) => return Err(io::Error::from(e)),
+        };
+
+        let success = self.sock.send(&mut buf).await;
+
+        match success {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }

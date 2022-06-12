@@ -51,10 +51,6 @@ async fn main() -> Result<()> {
         // We need to find a way to make sure that the timeout only resets on
         // appendEntry messages from the actual leader
 
-        match m.sock.poll_recv(cx, buffer) {
-            std::task::Poll::Ready(_) => todo!(),
-            std::task::Poll::Pending => todo!(),
-        }
         // I think I need to rewrite this to use poll_select, but I should look into it more
         match timeout(Duration::from_millis(m.election_timeout), attempt_read).await {
             Ok(msg) => {
@@ -87,7 +83,7 @@ async fn main() -> Result<()> {
                         if !m.vote_history.contains(&term)
                             && m.as_least_as_long(last_log_index, last_log_term)
                         {
-                            m.vote(term).await?
+                            m.vote(&body.src, term).await?
                         }
                     }
                     messages::RecvOptions::Vote { term } => {
@@ -118,7 +114,7 @@ async fn main() -> Result<()> {
                     // send heartbeat
                     todo!("send heartbeat")
                 } else {
-                    m.start_election()
+                    m.start_election();
                 }
             }
         }
