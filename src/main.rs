@@ -1,12 +1,12 @@
 use clap::Parser;
 use core::num;
-use raft::{Replica, ReplicaState};
+use replica::{Replica, ReplicaState};
 use std::io::Result;
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 
 mod messages;
-mod raft;
+mod replica;
 
 #[derive(Parser)]
 struct Args {
@@ -22,20 +22,22 @@ struct Args {
 //     transition my state to candidate
 //   - vote / respond to RequestVote (I vote for anyone as long as their log
 //     is at least as long as mine and I haven't voted for someone in the same term)
-//   - If I receive an append entry from a higher term than mine, I transition from
+//   - If I receive an append entry from an equal or higher term than mine, I transition from
 //     candidate to follower TODO!!!!
 //   - If I get a majority of votes, transition to state leader and start sending out append entries
 //     (Just need the append entries here)
 
 // TODO 6/7
 // - Fix this to use poll_recv instead of an async timeout
-// - Implement append entry - heartbeats, and if I receive an append entry from a term higher than mine (AS a candidate),  i switch back to follower
+// - Implement append entry - heartbeats, and if I receive an append entry from a term equal to or higher than mine (AS a candidate),  i switch back to follower
 // - Implement the Vote RPC
+
+// Next Milestone - Log Replication: Still need to break down what this is
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let mut m = raft::new(&args.machine_id, &args.replica_ids).await?;
+    let mut m = replica::new(&args.machine_id, &args.replica_ids).await?;
 
     loop {
         let attempt_read = m.read();
@@ -49,6 +51,10 @@ async fn main() -> Result<()> {
         // We need to find a way to make sure that the timeout only resets on
         // appendEntry messages from the actual leader
 
+        match m.sock.poll_recv(cx, buffer) {
+            std::task::Poll::Ready(_) => todo!(),
+            std::task::Poll::Pending => todo!(),
+        }
         // I think I need to rewrite this to use poll_select, but I should look into it more
         match timeout(Duration::from_millis(m.election_timeout), attempt_read).await {
             Ok(msg) => {
@@ -62,14 +68,14 @@ async fn main() -> Result<()> {
                         if m.is_leader() {
                             m.send_fail(&body.src, &body.mid).await?;
                         } else {
-                            m.redirect(&body.src, &body.mid).await?;
+                            m.redirect(&body.mid).await?;
                         }
                     }
                     messages::RecvOptions::Get { key } => {
                         if m.is_leader() {
                             m.get(&key, &body.src, &body.mid).await?;
                         } else {
-                            m.redirect(&body.src, &body.mid).await?;
+                            m.redirect(&body.mid).await?;
                         }
                     }
                     messages::RecvOptions::RequestVote {
@@ -103,22 +109,16 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            // We haven't received a message in {election_timeout} milliseconds
+            // Right now this tells us that we haven't received any message -
+            // it should tell us if we haven't received a message from the leader
+            // nbd - just reset the timeout only on messages from the leader
             Err(_) => {
                 if m.is_leader() {
                     // send heartbeat
                     todo!("send heartbeat")
                 } else {
-                    // This is where we start a leader election
-                    // set my state to candidate
-                    m.state = ReplicaState::Candidate;
-                    // increment my term
-                    m.term += 1;
-                    // vote for myself
-                    m.vote_tally.insert(m.term, 1);
-                    // mark that I have voted in this term
-                    m.vote_history.insert(m.term);
-                    // requeset votes from replicas
-                    m.request_vote().await?
+                    m.start_election()
                 }
             }
         }

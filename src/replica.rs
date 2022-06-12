@@ -3,14 +3,21 @@ use rand::{prelude::thread_rng, Rng};
 use std::{
     collections::{HashMap, HashSet},
     io::Error,
+    task::Poll,
+    time::SystemTime,
 };
 use tokio::io::{self};
 use tokio_seqpacket::UnixSeqpacket;
 
 pub struct Replica<'a> {
+    // these are the values that are persisted
     committed_values: HashMap<String, String>,
     id: &'a String,
-    sock: UnixSeqpacket,
+    pub sock: UnixSeqpacket,
+    // This is the time of the last append entry we've received - every time I get
+    // an append entry message, I reset the time_of_last_heartbeat to SystemTime::now
+    // If SystemTime::now - self.time_of_last_heartbeat > election_timeout, we need to do something
+    pub time_of_last_heartbeat: SystemTime,
     pub colleagues: &'a Vec<String>,
     pub state: ReplicaState,
     leader: &'a str,
@@ -20,6 +27,7 @@ pub struct Replica<'a> {
     // if an entry exists in the vote_history, then this replica has
     // already voted for someone in that term
     pub vote_history: HashSet<u16>,
+    // how many people have voted for me in each term?
     pub vote_tally: HashMap<u16, u16>,
 }
 
@@ -45,6 +53,7 @@ pub async fn new<'a>(
 
     let replica = match conn_attempt {
         Ok(sock) => Ok(Replica {
+            time_of_last_heartbeat: SystemTime::now(),
             vote_tally: HashMap::new(),
             vote_history: HashSet::new(),
             // election timeout in milliseconds
@@ -77,7 +86,10 @@ impl<'a> Replica<'a> {
             mid: mid.to_string(),
         }
     }
-    pub async fn read(&self) -> Result<messages::Recv, Error> {
+
+    // This should poll the socket - once i figure out how contexts work, this
+    // is gonna be super easy
+    pub async fn read(&self) -> Poll<messages::Recv> {
         let mut buf = [0u8; 32768];
 
         // should be using a timeout on the promise this returns
@@ -88,6 +100,20 @@ impl<'a> Replica<'a> {
             Ok(body) => Ok(body),
             Err(e) => Err(io::Error::from(e)),
         };
+    }
+
+    pub async fn start_election(&self) -> () {
+        // This is where we start a leader election
+        // set my state to candidate
+        self.state = ReplicaState::Candidate;
+        // increment my term
+        self.term += 1;
+        // vote for myself
+        self.vote_tally.insert(self.term, 1);
+        // mark that I have voted in this term
+        self.vote_history.insert(self.term);
+        // requeset votes from replicas
+        return self.request_vote().await?;
     }
 
     pub async fn send_fail(&self, dst: &str, mid: &str) -> Result<(), Error> {
@@ -137,9 +163,9 @@ impl<'a> Replica<'a> {
         }
     }
 
-    pub async fn redirect(&self, dst: &str, mid: &str) -> Result<(), Error> {
+    pub async fn redirect(&self, mid: &str) -> Result<(), Error> {
         let msg: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(&messages::Send {
-            body: self.build_body(dst, mid),
+            body: self.build_body(self.leader, mid),
             options: messages::SendOptions::Redirect,
         });
 
@@ -187,6 +213,7 @@ impl<'a> Replica<'a> {
     pub async fn vote(&self, term: u16) -> Result<(), Error> {
         todo!("Send a vote")
     }
+
     // This tells us if the other log is at least as long as ours
     pub fn as_least_as_long(&self, other_last_log_index: u16, other_last_log_term: u16) -> bool {
         /*
@@ -210,5 +237,9 @@ impl<'a> Replica<'a> {
             // everyone is at least as long as us
             None => true,
         }
+    }
+
+    pub fn election_timeout_elapsed(&self) -> bool {
+        return SystemTime::now() - self.time_of_last_heartbeat > self.election_timeout;
     }
 }
