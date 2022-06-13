@@ -1,10 +1,11 @@
 use crate::messages;
-use rand::{prelude::thread_rng, Rng};
+use rand::prelude::thread_rng;
+use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
     io::Error,
     task::Poll,
-    time::SystemTime,
+    time::{Duration, Instant},
 };
 use tokio::io::{self};
 use tokio_seqpacket::UnixSeqpacket;
@@ -16,14 +17,14 @@ pub struct Replica<'a> {
     pub sock: UnixSeqpacket,
     // This is the time of the last append entry we've received - every time I get
     // an append entry message, I reset the time_of_last_heartbeat to SystemTime::now
-    // If SystemTime::now - self.time_of_last_heartbeat > election_timeout, we need to do something
-    pub time_of_last_heartbeat: SystemTime,
+    // If  self.time_of_last_heartbeat.elapsed(election_timeout)> election_timeout, we need to do something
+    pub time_of_last_heartbeat: Instant,
     pub colleagues: &'a Vec<String>,
     pub state: ReplicaState,
     leader: &'a str,
     pub term: u16,
     log: Vec<LogEntry<'a>>,
-    pub election_timeout: u64,
+    pub election_timeout: Duration,
     // if an entry exists in the vote_history, then this replica has
     // already voted for someone in that term
     pub vote_history: HashSet<u16>,
@@ -50,14 +51,15 @@ pub async fn new<'a>(
 ) -> Result<Replica<'a>, Error> {
     let conn_attempt = UnixSeqpacket::connect(replica_id).await;
     let mut rng = thread_rng();
+    let ms: u64 = rng.gen_range(150..=300);
 
     let replica = match conn_attempt {
         Ok(sock) => Ok(Replica {
-            time_of_last_heartbeat: SystemTime::now(),
+            time_of_last_heartbeat: Instant::now(),
             vote_tally: HashMap::new(),
             vote_history: HashSet::new(),
             // election timeout in milliseconds
-            election_timeout: (rng.gen_range(0.15..0.30) * 100.0) as u64,
+            election_timeout: Duration::from_millis(ms),
             log: Vec::new(),
             committed_values: HashMap::new(),
             id: replica_id,
@@ -200,7 +202,7 @@ impl<'a> Replica<'a> {
     }
 
     pub fn election_timeout_elapsed(&self) -> bool {
-        return SystemTime::now() - self.time_of_last_heartbeat > self.election_timeout;
+        return self.time_of_last_heartbeat.elapsed() > self.election_timeout;
     }
 
     // abstract away sending messages

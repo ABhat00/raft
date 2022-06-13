@@ -1,8 +1,6 @@
 use clap::Parser;
-use core::num;
-use replica::{Replica, ReplicaState};
+use replica::ReplicaState;
 use std::io::Result;
-use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 
 mod messages;
@@ -30,7 +28,7 @@ struct Args {
 // TODO 6/7
 // - Fix this to use poll_recv instead of an async timeout
 // - Implement append entry - heartbeats, and if I receive an append entry from a term equal to or higher than mine (AS a candidate),  i switch back to follower
-// - Implement the Vote RPC
+// - Implement the Vote RPC - (Done)
 
 // Next Milestone - Log Replication: Still need to break down what this is
 #[tokio::main]
@@ -52,7 +50,7 @@ async fn main() -> Result<()> {
         // appendEntry messages from the actual leader
 
         // I think I need to rewrite this to use poll_select, but I should look into it more
-        match timeout(Duration::from_millis(m.election_timeout), attempt_read).await {
+        match timeout(m.election_timeout, attempt_read).await {
             Ok(msg) => {
                 let recv_msg = msg?;
 

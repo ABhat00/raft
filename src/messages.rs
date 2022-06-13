@@ -1,5 +1,3 @@
-use std::char::DecodeUtf16;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
