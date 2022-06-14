@@ -10,5 +10,6 @@ clap = { version = "3.0", features = ["derive"] }
 tokio-seqpacket = "0.5.4"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 serde_json = "1.0"
+futures = "0.3.21"
 rand = "0.8.5"
 serde = {version= "1.0.134", features=["derive"]}

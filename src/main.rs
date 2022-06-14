@@ -1,7 +1,7 @@
 use clap::Parser;
 use replica::ReplicaState;
 use std::io::Result;
-use tokio::time::timeout;
+use std::task::Poll;
 
 mod messages;
 mod replica;
@@ -50,10 +50,8 @@ async fn main() -> Result<()> {
         // appendEntry messages from the actual leader
 
         // I think I need to rewrite this to use poll_select, but I should look into it more
-        match timeout(m.election_timeout, attempt_read).await {
-            Ok(msg) => {
-                let recv_msg = msg?;
-
+        match attempt_read {
+            Poll::Ready(recv_msg) => {
                 println!("{:?}", recv_msg);
                 let body = recv_msg.body;
 
@@ -107,12 +105,16 @@ async fn main() -> Result<()> {
             // Right now this tells us that we haven't received any message -
             // it should tell us if we haven't received a message from the leader
             // nbd - just reset the timeout only on messages from the leader
-            Err(_) => {
-                if m.is_leader() {
-                    // send heartbeat
-                    todo!("send heartbeat")
-                } else {
-                    m.start_election();
+            Poll::Pending => {
+                if m.election_timeout_elapsed() {
+                    if m.is_leader() {
+                        // send heartbeat
+                        todo!("send heartbeat")
+                    } else {
+                        if let Err(x) = m.start_election().await {
+                            panic!("{:?}: Unrecoverable failure starting elections", x)
+                        }
+                    }
                 }
             }
         }

@@ -1,10 +1,11 @@
 use crate::messages;
+use futures::task;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
     io::Error,
-    task::Poll,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tokio::io::{self};
@@ -91,20 +92,35 @@ impl<'a> Replica<'a> {
 
     // This should poll the socket - once i figure out how contexts work, this
     // is gonna be super easy
-    pub async fn read(&self) -> Poll<messages::Recv> {
+    pub fn read(&self) -> Poll<messages::Recv> {
         let mut buf = [0u8; 32768];
 
-        // should be using a timeout on the promise this returns
-        let len = self.sock.recv(&mut buf).await?;
+        // This is jank - the idea is that the typical pattern
+        // is for the waker to be called when the socket is ready to be read from
+        // But what I want is for the task to continue - I want the election_timer to keep running
+        // maybe i should spawn a timer thread?
+        // see: https://tokio.rs/tokio/tutorial/async (Search for timer thread)
+        let waker = task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
 
-        let recv: Result<messages::Recv, serde_json::Error> = serde_json::from_slice(&buf[0..len]);
-        return match recv {
-            Ok(body) => Ok(body),
-            Err(e) => Err(io::Error::from(e)),
-        };
+        // should be using a timeout on the promise this returns
+        let status = self.sock.poll_recv(&mut cx, &mut buf);
+
+        match status {
+            Poll::Ready(res) => {
+                let len = match res {
+                    Ok(len) => len,
+                    Err(_) => panic!("Unrecoverable read failure"),
+                };
+
+                let recv: messages::Recv = serde_json::from_slice(&buf[0..len]).unwrap();
+                Poll::Ready(recv)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 
-    pub async fn start_election(&mut self) -> () {
+    pub async fn start_election(&mut self) -> Result<(), Error> {
         // This is where we start a leader election
         // set my state to candidate
         self.state = ReplicaState::Candidate;
@@ -114,8 +130,8 @@ impl<'a> Replica<'a> {
         self.vote_tally.insert(self.term, 1);
         // mark that I have voted in this term
         self.vote_history.insert(self.term);
-        // requeset votes from replicas
-        self.request_vote().await;
+        // request votes from replicas
+        self.request_vote().await
     }
 
     pub async fn send_fail(&self, dst: &str, mid: &str) -> Result<(), Error> {
