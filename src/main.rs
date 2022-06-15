@@ -34,9 +34,32 @@ struct Args {
 //   follower (Done - if the context/ poll recv bullshit wokrs)
 // - Implement the Vote RPC - (Done)
 
-// Next Milestone - Log Replication: Still need to break down what this is
-/// -
+/// Next Milestone - Log Replication: Still need to break down what this is
+/// Here's a rough sketch of how log replication works (written from the leaders POV)
 ///
+/// 1. Each time I (the leader) get a put request, I send an append entry to all
+///    of my followers. The append entry contains the index and term of the last
+///    last log entry that I think we (unique for each leader/replica pair) agree
+///    on. I track this "match index" for each replica (init to the last index)
+///    when I get elected
+///
+/// 2. If the replica's log agrees with my index and term, it will append everything
+///    I give it to the log starting at the last index we agree upon OVERWRITING
+///    ANYTHING THAT MAY EXIST AT THOSE LOCATIONS. It will then send me an AppendEntryResult{TRUE}
+///    and I can update the "match index" to be the length of my log
+///    (I know we must match up to the last element I just sent), and the next index
+///    to be the same
+///
+///    If it any point there exists an N (N is a log index) such that a majority of the servers
+///    have match index > N  (and N is greater than the commit_index and the term
+///    at entry N is the current term), set commit_index to N and commit everything
+///    up to that point
+///
+/// 3. If the replica's log DISAGREES with my index and term, decrement next_index,
+///    and retry with one less matching element. Once I find the term we agree upon,
+///    I send the whole set of entries, and overwrite everything the replica currently has
+///    that doesn't match with us
+///    
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -55,7 +78,13 @@ async fn main() -> Result<()> {
         // We need to find a way to make sure that the timeout only resets on
         // appendEntry messages from the actual leader
 
-        // I think I need to rewrite this to use poll_select, but I should look into it more
+        // I think I need to rewrite this to use poll_recv, but I should look into it more
+
+        /// Hopefully this works? I rewrote it to use poll_recv - the only issue is that
+        /// I'm not sure how to construct the context.  I'm currently using a
+        ///  no-op context. The idea is that I'm polling in a loop anyways, so I
+        /// don't need a waker to wake up the task - I can just drop the task
+        /// and it should get cleaned up on its own
         match attempt_read {
             Poll::Ready(recv_msg) => {
                 println!("{:?}", recv_msg);

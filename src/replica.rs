@@ -135,6 +135,7 @@ impl<'a> Replica<'a> {
         // This is where we start a leader election
         // set my state to candidate
         self.state = ReplicaState::Candidate;
+        self.reset_time_of_last_heartbeat();
         // increment my term
         self.term += 1;
         // vote for myself
@@ -207,6 +208,7 @@ impl<'a> Replica<'a> {
     }
 
     pub async fn vote(&self, dst: &str, term: u16) -> Result<(), Error> {
+        self.vote_history.insert(term);
         self.send_msg(&messages::Send {
             body: self.build_body(dst, "mid"),
             options: messages::SendOptions::Vote { term },
