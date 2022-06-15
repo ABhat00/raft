@@ -207,7 +207,7 @@ impl<'a> Replica<'a> {
         }
     }
 
-    pub async fn vote(&self, dst: &str, term: u16) -> Result<(), Error> {
+    pub async fn vote(&mut self, dst: &str, term: u16) -> Result<(), Error> {
         self.vote_history.insert(term);
         self.send_msg(&messages::Send {
             body: self.build_body(dst, "mid"),
