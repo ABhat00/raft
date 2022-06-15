@@ -1,4 +1,5 @@
 use clap::Parser;
+use messages::RecvOptions;
 use replica::ReplicaState;
 use std::io::Result;
 use std::task::Poll;
@@ -26,7 +27,7 @@ struct Args {
 //     (Just need the append entries here)
 
 // TODO 6/7
-// - Fix this to use poll_recv instead of an async timeout
+// - Fix this to use poll_recv instead of an async timeout (Done) (Kinda?)
 // - Implement append entry - heartbeats, and if I receive an append entry from a term equal to or higher than mine (AS a candidate),  i switch back to follower
 // - Implement the Vote RPC - (Done)
 
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
     let mut m = replica::new(&args.machine_id, &args.replica_ids).await?;
 
     loop {
-        let attempt_read = m.read();
+        let attempt_read = m.read().await;
 
         // This timeout could cause problems - it resets if we get any message,
         // not just messages from the leader. This means that illegitimate leaders
@@ -56,21 +57,21 @@ async fn main() -> Result<()> {
                 let body = recv_msg.body;
 
                 match recv_msg.options {
-                    messages::RecvOptions::Put { key, value } => {
+                    RecvOptions::Put { key, value } => {
                         if m.is_leader() {
-                            m.send_fail(&body.src, &body.mid).await?;
+                            m.commit(key, value);
                         } else {
                             m.redirect(&body.mid).await?;
                         }
                     }
-                    messages::RecvOptions::Get { key } => {
+                    RecvOptions::Get { key } => {
                         if m.is_leader() {
                             m.get(&key, &body.src, &body.mid).await?;
                         } else {
                             m.redirect(&body.mid).await?;
                         }
                     }
-                    messages::RecvOptions::RequestVote {
+                    RecvOptions::RequestVote {
                         term,
                         last_log_index,
                         last_log_term,
@@ -82,8 +83,8 @@ async fn main() -> Result<()> {
                             m.vote(&body.src, term).await?
                         }
                     }
-                    messages::RecvOptions::Vote { term } => {
-                        if matches!(m.state, ReplicaState::Candidate) {
+                    RecvOptions::Vote { term } => {
+                        if matches!(m.state, ReplicaState::Candidate) && term == m.term {
                             // 1. tally the vote (this key should already exist in the map because I voted for myself)
                             let num_votes_in_term = m.vote_tally.entry(term).or_insert(1);
 
@@ -95,10 +96,22 @@ async fn main() -> Result<()> {
                                 m.state = ReplicaState::Leader;
 
                                 // 4. Send an append entry
-                                todo!("send append entry (this is really just a heartbeat)")
+                                m.send_heartbeat(term).await?;
                             }
                         }
                     }
+                    RecvOptions::AppendEntry {
+                        term,
+                        leader_id,
+                        prev_log_index,
+                        prev_log_term,
+                        entries,
+                        leader_commit_index,
+                    } => {
+                        m.reset_time_of_last_heartbeat();
+                        m.should_accept_leader(term, leader_id)
+                    }
+                    RecvOptions::AppendEntryResult { term, success } => {}
                 }
             }
             // We haven't received a message in {election_timeout} milliseconds
@@ -109,7 +122,7 @@ async fn main() -> Result<()> {
                 if m.election_timeout_elapsed() {
                     if m.is_leader() {
                         // send heartbeat
-                        todo!("send heartbeat")
+                        m.send_heartbeat(m.term).await?;
                     } else {
                         if let Err(x) = m.start_election().await {
                             panic!("{:?}: Unrecoverable failure starting elections", x)

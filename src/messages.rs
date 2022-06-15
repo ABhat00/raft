@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::replica::LogEntry;
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Send {
     #[serde(flatten)]
@@ -44,6 +46,26 @@ pub enum RecvOptions {
     },
     #[serde(rename = "vote")]
     Vote { term: u16 },
+
+    #[serde(rename = "append_entry")]
+    AppendEntry {
+        term: u16,
+        leader_id: String,
+        // index of log entry immediately preceding new ones
+        prev_log_index: u16,
+        // term of prevLogIndex entry
+        prev_log_term: u16,
+        entries: Vec<LogEntry>,
+        // index of the last log entry that the leader has committed
+        leader_commit_index: u16,
+    },
+    #[serde(rename = "append_entry_result")]
+    AppendEntryResult {
+        // currentTerm, for leader to update itself
+        term: u16,
+        // true if follower contained entry matching prevLogIndex and prevLogTerm
+        success: bool,
+    },
 }
 
 // SendOptions is the collection of messages that a replica can send
@@ -68,6 +90,27 @@ pub enum SendOptions {
     },
     #[serde(rename = "vote")]
     Vote { term: u16 },
+
+    #[serde(rename = "append_entry")]
+    AppendEntry {
+        term: u16,
+        leader_id: String,
+        // index of log entry immediately preceding new ones
+        prev_log_index: u16,
+        // term of prevLogIndex entry
+        prev_log_term: u16,
+        entries: Vec<LogEntry>,
+        // index of the last log entry that the leader has committed
+        leader_commit_index: u16,
+    },
+
+    #[serde(rename = "append_entry_result")]
+    AppendEntryResult {
+        // currentTerm, for leader to update itself
+        term: u16,
+        // true if follower contained entry matching prevLogIndex and prevLogTerm
+        success: bool,
+    },
 }
 
 // This test only runs on Unix machines - UnixSeqPacket won't compile
