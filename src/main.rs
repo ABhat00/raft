@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
 
     let mut m = replica::new(&args.machine_id, &args.replica_ids).await?;
 
+    let required_vote_threshold: u16 = ((m.colleagues.len() / 2) + 1).try_into().unwrap();
     loop {
         let attempt_read = m.read().await;
 
@@ -85,24 +86,33 @@ async fn main() -> Result<()> {
         ///  no-op context. The idea is that I'm polling in a loop anyways, so I
         /// don't need a waker to wake up the task - I can just drop the task
         /// and it should get cleaned up on its own
+        ///
+        /// Ok so the polling seems to work - everything else is broken. Progress!
         match attempt_read {
             Poll::Ready(recv_msg) => {
-                println!("{:?}", recv_msg);
+                if m.id == "0000" {
+                    println!("{:?}", recv_msg);
+                }
                 let body = recv_msg.body;
 
                 match recv_msg.options {
                     RecvOptions::Put { key, value } => {
                         if m.is_leader() {
-                            m.commit(key, value);
+                            match m.commit(key, value) {
+                                Some(_) => m.send_ok(&body.src, &body.mid).await?,
+                                None => m.send_fail(&body.src, &body.mid).await?,
+                            }
                         } else {
-                            m.redirect(&body.mid).await?;
+                            // We don't redirect to the leader, we redirect to
+                            // the client
+                            m.redirect(&body.src, &body.mid).await?;
                         }
                     }
                     RecvOptions::Get { key } => {
                         if m.is_leader() {
                             m.get(&key, &body.src, &body.mid).await?;
                         } else {
-                            m.redirect(&body.mid).await?;
+                            m.redirect(&body.src, &body.mid).await?;
                         }
                     }
                     RecvOptions::RequestVote {
@@ -122,14 +132,17 @@ async fn main() -> Result<()> {
                             // 1. tally the vote (this key should already exist in the map because I voted for myself)
                             let num_votes_in_term = m.vote_tally.entry(term).or_insert(1);
 
-                            let required_vote_threshold: u16 =
-                                ((m.colleagues.len() / 2) + 1).try_into().unwrap();
+                            *num_votes_in_term += 1;
+
                             // 2. see if we're the leader yet
                             if *num_votes_in_term >= required_vote_threshold {
                                 // 3. Change our status to leader
                                 m.state = ReplicaState::Leader;
 
+                                println!("{} is the leader, in term {}", m.id, m.term);
+
                                 // 4. Send an append entry
+                                m.reset_time_of_last_heartbeat();
                                 m.send_heartbeat(term).await?;
                             }
                         }
@@ -156,8 +169,12 @@ async fn main() -> Result<()> {
                 if m.election_timeout_elapsed() {
                     if m.is_leader() {
                         // send heartbeat
+                        m.reset_time_of_last_heartbeat();
                         m.send_heartbeat(m.term).await?;
                     } else {
+                        if m.id == "0000" {
+                            println!("starting election {}", m.id);
+                        }
                         if let Err(x) = m.start_election().await {
                             panic!("{:?}: Unrecoverable failure starting elections", x)
                         }
@@ -166,4 +183,6 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    Ok(())
 }

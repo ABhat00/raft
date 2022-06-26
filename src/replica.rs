@@ -19,7 +19,7 @@ pub struct Replica<'a> {
 
     // these are the values that are persisted
     committed_values: HashMap<String, String>,
-    id: &'a String,
+    pub id: &'a String,
     pub sock: UnixSeqpacket,
     // This is the time of the last append entry we've received - every time I get
     // an append entry message, I reset the time_of_last_heartbeat to SystemTime::now
@@ -134,8 +134,8 @@ impl<'a> Replica<'a> {
     pub async fn start_election(&mut self) -> Result<(), Error> {
         // This is where we start a leader election
         // set my state to candidate
-        self.state = ReplicaState::Candidate;
         self.reset_time_of_last_heartbeat();
+        self.state = ReplicaState::Candidate;
         // increment my term
         self.term += 1;
         // vote for myself
@@ -172,9 +172,8 @@ impl<'a> Replica<'a> {
     }
 
     pub fn should_accept_leader(&mut self, other_term: u16, leader_id: String) {
-        if matches!(self.state, ReplicaState::Candidate)
-            || matches!(self.state, ReplicaState::Follower)
-        {
+        println!("{} accepting leader {}", self.id, leader_id);
+        if !matches!(self.state, ReplicaState::Leader) {
             if other_term >= self.term {
                 self.state = ReplicaState::Follower;
                 self.leader = leader_id;
@@ -182,9 +181,9 @@ impl<'a> Replica<'a> {
         }
     }
 
-    pub async fn redirect(&self, mid: &str) -> Result<(), Error> {
+    pub async fn redirect(&self, dst: &str, mid: &str) -> Result<(), Error> {
         self.send_msg(&messages::Send {
-            body: self.build_body(&self.leader, mid),
+            body: self.build_body(dst, mid),
             options: messages::SendOptions::Redirect,
         })
         .await
@@ -207,6 +206,14 @@ impl<'a> Replica<'a> {
         }
     }
 
+    pub async fn send_ok(&self, dst: &str, mid: &str) -> Result<(), Error> {
+        self.send_msg(&messages::Send {
+            body: self.build_body(dst, mid),
+            options: messages::SendOptions::WriteOK,
+        })
+        .await
+    }
+
     pub async fn vote(&mut self, dst: &str, term: u16) -> Result<(), Error> {
         self.vote_history.insert(term);
         self.send_msg(&messages::Send {
@@ -226,7 +233,7 @@ impl<'a> Replica<'a> {
             self.log.len() - 1
         } else {
             // I'm never going to send an append entry if there's nothing in my log
-            panic!("I should never send an append entry if there's nothing in my log");
+            0
         };
 
         self.send_msg(&messages::Send {
@@ -274,7 +281,7 @@ impl<'a> Replica<'a> {
     }
 
     pub fn election_timeout_elapsed(&self) -> bool {
-        return self.time_of_last_heartbeat.elapsed() > self.election_timeout;
+        return self.time_of_last_heartbeat.elapsed() >= self.election_timeout;
     }
 
     // abstract away sending messages
