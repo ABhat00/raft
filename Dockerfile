@@ -12,15 +12,13 @@ RUN cd / &&\
     cargo new raft 
 WORKDIR /raft
 
-ADD Cargo.toml /raft/Cargo.toml
+COPY Cargo.toml Cargo.lock .
 RUN cargo build
-RUN rm src/*.rs
+RUN rm -r src/
 
 COPY tests/ tests/
 COPY run.py test.py .
-COPY src/ src/
-RUN cargo clean && cargo build
+COPY ./src src
+RUN touch src/main.rs && cargo build
 
 RUN mv target/debug/raft 3700kvstore
-
-CMD ["./run.py", "tests/simple-1.json"]

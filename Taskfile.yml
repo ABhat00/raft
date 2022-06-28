@@ -5,33 +5,31 @@ version: '3'
 vars:
 
 tasks:
+  run:
+    deps: [build]
+    cmds:
+      - docker run raft ./run.py {{.CLI_ARGS}}
+  test:
+    deps: [build]
+    cmds:
+      - docker run raft cargo test
+  check:
+    cmds:
+      - cargo check --target=x86_64-unknown-linux-musl
   all:
     cmds:
       - task: build:debug
       - task: publish
-  test:
-    cmds:
-      - ssh ameyabhat@login.ccs.neu.edu "cd ~/networks/raft && cargo test --target=x86_64-unknown-linux-musl"
-  test-remote:
-    cmds:
-      - ssh ameyabhat@login.ccs.neu.edu "cd ~/networks/raft && ./run.py tests/{{.CLI_ARGS}}.json"
-  check:
-    cmds:
-      - cargo check --target=x86_64-unknown-linux-musl
   build:debug:
     cmds:
       - cargo build --target=x86_64-unknown-linux-musl
-      - mv target/x86_64-unknown-linux-musl/debug/raft .
-      - task: move-and-format
+      - mv target/x86_64-unknown-linux-musl/debug/raft 3700kvstore
     silent: true
   build:release:
     cmds:
       - cargo build --release --target=x86_64-unknown-linux-musl
-      - mv target/x86_64-unknown-linux-musl/release/raft .
-      - task: move-and-format
+      - mv target/x86_64-unknown-linux-musl/release/raft 3700kvstore
     silent: true
-  move-and-format:
-      - mv raft 3700kvstore
   clean:
     cmds: 
       - cargo clean
@@ -39,3 +37,5 @@ tasks:
   publish:
     cmds:
       - scp 3700kvstore ameyabhat@login.ccs.neu.edu:~/networks/raft
+  build:
+    -  docker build -t raft:latest .
