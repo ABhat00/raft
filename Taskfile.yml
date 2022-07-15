@@ -8,7 +8,7 @@ tasks:
   run:
     deps: [build]
     cmds:
-      - docker run raft ./run.py {{.CLI_ARGS}}
+      - docker run -v raftlogs:/var/logs raft ./run.py {{.CLI_ARGS}} 
   test:
     deps: [build]
     cmds:
@@ -39,3 +39,11 @@ tasks:
       - scp 3700kvstore ameyabhat@login.ccs.neu.edu:~/networks/raft
   build:
     -  docker build -t raft:latest .
+  view-logs:
+    cmds:
+      - docker run -v raftlogs:/var/logs raft cat /var/logs/{{.CLI_ARGS}} | bat
+    interactive: true
+  view-all-logs:
+    cmds:
+      - docker run -v raftlogs:/var/logs raft cat /var/logs/* | bat
+    interactive: true

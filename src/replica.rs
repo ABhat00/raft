@@ -1,3 +1,4 @@
+use crate::loggers;
 use crate::messages;
 use core::panic;
 use futures::task;
@@ -36,6 +37,7 @@ pub struct Replica<'a> {
     pub vote_history: HashSet<u16>,
     // how many people have voted for me in each term?
     pub vote_tally: HashMap<u16, u16>,
+    pub logger: Box<dyn loggers::Logger>,
 }
 
 #[derive(PartialEq)]
@@ -69,6 +71,10 @@ pub async fn new<'a>(
             leader: "FFFF".to_string(),
             term: 0,
             commit_index: 0,
+            logger: Box::new(loggers::new_file_logger(format!(
+                "/var/logs/{}",
+                replica_id
+            ))),
         }),
         Err(e) => Err(e),
     };
@@ -138,6 +144,8 @@ impl<'a> Replica<'a> {
         self.state = ReplicaState::Candidate;
         // increment my term
         self.term += 1;
+        self.logger
+            .log(format!("Starting an election in term {}", self.term));
         // vote for myself
         self.vote_tally.insert(self.term, 1);
         // mark that I have voted in this term
@@ -171,14 +179,13 @@ impl<'a> Replica<'a> {
         .await
     }
 
-    pub fn should_accept_leader(&mut self, other_term: u16, leader_id: String) {
-        println!("{} accepting leader {}", self.id, leader_id);
-        if !matches!(self.state, ReplicaState::Leader) {
-            if other_term >= self.term {
-                self.state = ReplicaState::Follower;
-                self.leader = leader_id;
-            }
-        }
+    pub fn should_accept_leader(&mut self, other_term: u16) -> bool {
+        // This is dumb
+        // what happens if two nodes both think that they're leaders, and one
+        // gets an append entry from the other
+
+        // I don't know if this first ! matches statement should be here
+        !matches!(self.state, ReplicaState::Leader) && other_term >= self.term
     }
 
     pub async fn redirect(&self, dst: &str, mid: &str) -> Result<(), Error> {
@@ -217,7 +224,7 @@ impl<'a> Replica<'a> {
     pub async fn vote(&mut self, dst: &str, term: u16) -> Result<(), Error> {
         self.vote_history.insert(term);
         self.send_msg(&messages::Send {
-            body: self.build_body(dst, "mid"),
+            body: self.build_body(dst, &format!("vote for {}", dst)),
             options: messages::SendOptions::Vote { term },
         })
         .await

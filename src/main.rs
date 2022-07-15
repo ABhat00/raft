@@ -4,6 +4,7 @@ use replica::ReplicaState;
 use std::io::Result;
 use std::task::Poll;
 
+mod loggers;
 mod messages;
 mod replica;
 
@@ -13,7 +14,6 @@ struct Args {
     replica_ids: Vec<String>,
 }
 
-// testing build caching
 // What do I have left to do?
 // TODO: Implement Leader Elections
 //   - init replicas with randomized timeouts (Done)
@@ -34,33 +34,34 @@ struct Args {
 //   a term equal to or higher than mine (AS a candidate),  i switch back to
 //   follower (Done - if the context/ poll recv bullshit wokrs)
 // - Implement the Vote RPC - (Done)
+// - Leader elections still don't work, this is some bullshit
 
-/// Next Milestone - Log Replication: Still need to break down what this is
-/// Here's a rough sketch of how log replication works (written from the leaders POV)
-///
-/// 1. Each time I (the leader) get a put request, I send an append entry to all
-///    of my followers. The append entry contains the index and term of the last
-///    last log entry that I think we (unique for each leader/replica pair) agree
-///    on. I track this "match index" for each replica (init to the last index)
-///    when I get elected
-///
-/// 2. If the replica's log agrees with my index and term, it will append everything
-///    I give it to the log starting at the last index we agree upon OVERWRITING
-///    ANYTHING THAT MAY EXIST AT THOSE LOCATIONS. It will then send me an AppendEntryResult{TRUE}
-///    and I can update the "match index" to be the length of my log
-///    (I know we must match up to the last element I just sent), and the next index
-///    to be the same
-///
-///    If it any point there exists an N (N is a log index) such that a majority of the servers
-///    have match index > N  (and N is greater than the commit_index and the term
-///    at entry N is the current term), set commit_index to N and commit everything
-///    up to that point
-///
-/// 3. If the replica's log DISAGREES with my index and term, decrement next_index,
-///    and retry with one less matching element. Once I find the term we agree upon,
-///    I send the whole set of entries, and overwrite everything the replica currently has
-///    that doesn't match with us
-///    
+// Next Milestone - Log Replication: Still need to break down what this is
+// Here's a rough sketch of how log replication works (written from the leaders POV)
+//
+// 1. Each time I (the leader) get a put request, I send an append entry to all
+//    of my followers. The append entry contains the index and term of the last
+//    last log entry that I think we (unique for each leader/replica pair) agree
+//    on. I track this "match index" for each replica (init to the last index)
+//    when I get elected
+//
+// 2. If the replica's log agrees with my index and term, it will append everything
+//    I give it to the log starting at the last index we agree upon OVERWRITING
+//    ANYTHING THAT MAY EXIST AT THOSE LOCATIONS. It will then send me an AppendEntryResult{TRUE}
+//    and I can update the "match index" to be the length of my log
+//    (I know we must match up to the last element I just sent), and the next index
+//    to be the same
+//
+//    If it any point there exists an N (N is a log index) such that a majority of the servers
+//    have match index > N  (and N is greater than the commit_index and the term
+//    at entry N is the current term), set commit_index to N and commit everything
+//    up to that point
+//
+// 3. If the replica's log DISAGREES with my index and term, decrement next_index,
+//    and retry with one less matching element. Once I find the term we agree upon,
+//    I send the whole set of entries, and overwrite everything the replica currently has
+//    that doesn't match with us
+//
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -82,18 +83,15 @@ async fn main() -> Result<()> {
 
         // I think I need to rewrite this to use poll_recv, but I should look into it more
 
-        /// Hopefully this works? I rewrote it to use poll_recv - the only issue is that
-        /// I'm not sure how to construct the context.  I'm currently using a
-        ///  no-op context. The idea is that I'm polling in a loop anyways, so I
-        /// don't need a waker to wake up the task - I can just drop the task
-        /// and it should get cleaned up on its own
-        ///
-        /// Ok so the polling seems to work - everything else is broken. Progress!
+        // Hopefully this works? I rewrote it to use poll_recv - the only issue is that
+        // I'm not sure how to construct the context.  I'm currently using a
+        //  no-op context. The idea is that I'm polling in a loop anyways, so I
+        // don't need a waker to wake up the task - I can just drop the task
+        // and it should get cleaned up on its own
+        //
+        // Ok so the polling seems to work - everything else is broken. Progress!
         match attempt_read {
             Poll::Ready(recv_msg) => {
-                if m.id == "0000" {
-                    println!("{:?}", recv_msg);
-                }
                 let body = recv_msg.body;
 
                 match recv_msg.options {
@@ -110,6 +108,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     RecvOptions::Get { key } => {
+                        // m.logger.log(format!("leader is {} ", m.leader));
                         if m.is_leader() {
                             m.get(&key, &body.src, &body.mid).await?;
                         } else {
@@ -125,6 +124,8 @@ async fn main() -> Result<()> {
                         if !m.vote_history.contains(&term)
                             && m.as_least_as_long(last_log_index, last_log_term)
                         {
+                            m.logger
+                                .log(format!("voting for {} in term {}", &body.src, term));
                             m.vote(&body.src, term).await?
                         }
                     }
@@ -139,8 +140,12 @@ async fn main() -> Result<()> {
                             if *num_votes_in_term >= required_vote_threshold {
                                 // 3. Change our status to leader
                                 m.state = ReplicaState::Leader;
+                                m.leader = m.id.to_string();
 
-                                println!("{} is the leader, in term {}", m.id, m.term);
+                                m.logger.log(format!(
+                                    "{} is the leader, in term {}, with {} votes",
+                                    m.id, m.term, *num_votes_in_term
+                                ));
 
                                 // 4. Send an append entry
                                 m.reset_time_of_last_heartbeat();
@@ -156,8 +161,17 @@ async fn main() -> Result<()> {
                         entries,
                         leader_commit_index,
                     } => {
-                        m.reset_time_of_last_heartbeat();
-                        m.should_accept_leader(term, leader_id)
+                        if leader_id == m.leader {
+                            m.reset_time_of_last_heartbeat();
+                        } else if m.should_accept_leader(term) {
+                            m.logger.log(format!(
+                                "{} accepting leader {} in term {}",
+                                m.id, leader_id, term
+                            ));
+                            m.state = ReplicaState::Follower;
+                            m.leader = leader_id;
+                            m.term = term;
+                        }
                     }
                     RecvOptions::AppendEntryResult { term, success } => {}
                 }
@@ -173,9 +187,6 @@ async fn main() -> Result<()> {
                         m.reset_time_of_last_heartbeat();
                         m.send_heartbeat(m.term).await?;
                     } else {
-                        if m.id == "0000" {
-                            println!("starting election {}", m.id);
-                        }
                         if let Err(x) = m.start_election().await {
                             panic!("{:?}: Unrecoverable failure starting elections", x)
                         }
