@@ -1,4 +1,4 @@
-FROM rust:latest 
+FROM rust:latest as builder
 
 RUN apt-get update -y \
     && apt-get install -y python2 \
@@ -12,12 +12,12 @@ RUN cd / &&\
     cargo new raft 
 WORKDIR /raft
 
-COPY Cargo.toml Cargo.lock .
+COPY Cargo.toml Cargo.lock ./
 RUN cargo build
 RUN rm -r src/
 
 COPY tests/ tests/
-COPY run.py test.py .
+COPY run.py test.py ./
 COPY ./src src
 RUN touch src/main.rs && cargo build
 

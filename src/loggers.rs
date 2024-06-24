@@ -3,7 +3,7 @@ use std::{
     io::{Result, Write},
 };
 
-pub trait Logger {
+pub trait Logger: Send + Sync {
     fn log(&mut self, to_write: String) -> Result<()>;
 }
 
@@ -15,12 +15,12 @@ pub fn new_file_logger<'a>(path: String) -> FileLogger {
     let file = fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .open(path.to_string())
-        .expect(&format!("could not open file {}", path.to_string()));
+        .open(&path)
+        .expect(&format!("could not open file {}", path));
 
     file.set_len(0);
 
-    return FileLogger { file: file };
+    FileLogger { file }
 }
 
 impl Logger for FileLogger {

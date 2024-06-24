@@ -1,14 +1,11 @@
 use crate::loggers;
 use crate::messages;
-use core::panic;
-use futures::task;
 use rand::prelude::thread_rng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::Error,
-    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tokio::io::{self};
@@ -32,6 +29,7 @@ pub struct Replica<'a> {
     pub term: u16,
     pub log: Vec<LogEntry>,
     pub election_timeout: Duration,
+    pub last_applied: u16,
     // if an entry exists in the vote_history, then this replica has
     // already voted for someone in that term
     pub vote_history: HashSet<u16>,
@@ -47,39 +45,35 @@ pub enum ReplicaState {
     Candidate,
 }
 
-pub async fn new<'a>(
-    replica_id: &'a String,
-    colleague_ids: &'a Vec<String>,
-) -> Result<Replica<'a>, Error> {
-    let conn_attempt = UnixSeqpacket::connect(replica_id).await;
+pub async fn new<'a>(replica_id: &'a String, colleague_ids: &'a Vec<String>) -> Replica<'a> {
+    // this needs to move out into the orchestrator layer - this is going to get replaced with a send and receive channel
+    let sock = UnixSeqpacket::connect(replica_id).await.unwrap();
     let mut rng = thread_rng();
+    // don't need this either
     let ms: u64 = rng.gen_range(150..=300);
 
-    let replica = match conn_attempt {
-        Ok(sock) => Ok(Replica {
-            time_of_last_heartbeat: Instant::now(),
-            vote_tally: HashMap::new(),
-            vote_history: HashSet::new(),
-            // election timeout in milliseconds
-            election_timeout: Duration::from_millis(ms),
-            log: Vec::new(),
-            committed_values: HashMap::new(),
-            id: replica_id,
-            sock,
-            colleagues: colleague_ids,
-            state: ReplicaState::Follower,
-            leader: "FFFF".to_string(),
-            term: 0,
-            commit_index: 0,
-            logger: Box::new(loggers::new_file_logger(format!(
-                "/var/logs/{}",
-                replica_id
-            ))),
-        }),
-        Err(e) => Err(e),
-    };
-
-    return replica;
+    Replica {
+        // or this
+        time_of_last_heartbeat: Instant::now(),
+        vote_tally: HashMap::new(),
+        vote_history: HashSet::new(),
+        // election timeout in milliseconds
+        election_timeout: Duration::from_millis(ms),
+        log: Vec::new(),
+        committed_values: HashMap::new(),
+        id: replica_id,
+        sock,
+        colleagues: colleague_ids,
+        state: ReplicaState::Follower,
+        leader: "FFFF".to_string(),
+        term: 0,
+        commit_index: 0,
+        last_applied: 0,
+        logger: Box::new(loggers::new_file_logger(format!(
+            "/var/logs/{}",
+            replica_id
+        ))),
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -89,12 +83,18 @@ pub struct LogEntry {
     value: String,
 }
 
+pub enum RaftError {}
+
 impl<'a> Replica<'a> {
-    pub fn is_leader(&self) -> bool {
-        return matches!(self.state, ReplicaState::Leader);
+    pub fn start_replica() -> Result<(), RaftError> {
+        Ok(())
     }
 
-    pub fn build_body(&self, dst: &str, mid: &str) -> messages::Body {
+    pub fn is_leader(&self) -> bool {
+        matches!(self.state, ReplicaState::Leader)
+    }
+
+    fn build_body(&self, dst: &str, mid: &str) -> messages::Body {
         messages::Body {
             src: self.id.to_string(),
             dst: dst.to_string(),
@@ -107,34 +107,15 @@ impl<'a> Replica<'a> {
         self.committed_values.insert(k, v)
     }
 
-    // This should poll the socket - once i figure out how contexts work, this
-    // is gonna be super easy
-    pub async fn read(&self) -> Poll<messages::Recv> {
+    pub async fn read(&self) -> messages::ServerMessage {
         let mut buf = [0u8; 32768];
 
-        // This is jank - the idea is that the typical pattern
-        // is for the waker to be called when the socket is ready to be read from
-        // But what I want is for the task to continue - I want the election_timer to keep running
-        // maybe i should spawn a timer thread?
-        // see: https://tokio.rs/tokio/tutorial/async (Search for timer thread)
-        let waker = task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        // should be using a timeout on the promise this returns
-        let status = self.sock.poll_recv(&mut cx, &mut buf);
-
-        match status {
-            Poll::Ready(res) => {
-                let len = match res {
-                    Ok(len) => len,
-                    Err(_) => panic!("Unrecoverable read failure"),
-                };
-
-                let recv: messages::Recv = serde_json::from_slice(&buf[0..len]).unwrap();
-                Poll::Ready(recv)
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        self.sock
+            .recv(&mut buf)
+            .await
+            // This is strange, i don't want to map to an io error here
+            .and_then(|len| serde_json::from_slice(&buf[0..len]).map_err(io::Error::from))
+            .unwrap()
     }
 
     pub async fn start_election(&mut self) -> Result<(), Error> {
@@ -145,7 +126,7 @@ impl<'a> Replica<'a> {
         // increment my term
         self.term += 1;
         self.logger
-            .log(format!("Starting an election in term {}", self.term));
+            .log(format!("Starting an election in term {}", self.term))?;
         // vote for myself
         self.vote_tally.insert(self.term, 1);
         // mark that I have voted in this term
@@ -155,11 +136,13 @@ impl<'a> Replica<'a> {
     }
 
     pub async fn send_fail(&self, dst: &str, mid: &str) -> Result<(), Error> {
-        self.send_msg(&messages::Send {
+        self.send_msg(&messages::ClientMessage {
             body: self.build_body(dst, mid),
-            options: messages::SendOptions::Fail,
+            options: messages::ClientOptions::Fail,
         })
-        .await
+        .await?;
+
+        Ok(())
     }
 
     pub async fn request_vote(&self) -> Result<(), Error> {
@@ -168,15 +151,17 @@ impl<'a> Replica<'a> {
             None => 0,
         };
 
-        self.send_msg(&messages::Send {
+        self.send_msg(&messages::ServerMessage {
             body: self.build_body("FFFF", "mid"),
-            options: messages::SendOptions::RequestVote {
+            options: messages::ServerOptions::RequestVote {
                 term: self.term,
                 last_log_index: self.log.len() as u16,
-                last_log_term: last_log_term,
+                last_log_term,
             },
         })
-        .await
+        .await?;
+
+        Ok(())
     }
 
     pub fn should_accept_leader(&mut self, other_term: u16) -> bool {
@@ -189,11 +174,13 @@ impl<'a> Replica<'a> {
     }
 
     pub async fn redirect(&self, dst: &str, mid: &str) -> Result<(), Error> {
-        self.send_msg(&messages::Send {
+        self.send_msg(&messages::ClientMessage {
             body: self.build_body(dst, mid),
-            options: messages::SendOptions::Redirect,
+            options: messages::ClientOptions::Redirect,
         })
-        .await
+        .await?;
+
+        Ok(())
     }
 
     pub async fn get(&self, key: &str, dst: &str, mid: &str) -> Result<(), Error> {
@@ -201,33 +188,38 @@ impl<'a> Replica<'a> {
 
         match lookup {
             Some(v) => {
-                self.send_msg(&messages::Send {
+                self.send_msg(&messages::ClientMessage {
                     body: self.build_body(dst, mid),
-                    options: messages::SendOptions::ReadOk {
+                    options: messages::ClientOptions::ReadOk {
                         value: v.to_string(),
                     },
                 })
-                .await
+                .await?;
+                Ok(())
             }
             None => self.send_fail(dst, mid).await,
         }
     }
 
     pub async fn send_ok(&self, dst: &str, mid: &str) -> Result<(), Error> {
-        self.send_msg(&messages::Send {
+        self.send_msg(&messages::ClientMessage {
             body: self.build_body(dst, mid),
-            options: messages::SendOptions::WriteOK,
+            options: messages::ClientOptions::WriteOK,
         })
-        .await
+        .await?;
+
+        Ok(())
     }
 
     pub async fn vote(&mut self, dst: &str, term: u16) -> Result<(), Error> {
         self.vote_history.insert(term);
-        self.send_msg(&messages::Send {
+        self.send_msg(&messages::ServerMessage {
             body: self.build_body(dst, &format!("vote for {}", dst)),
-            options: messages::SendOptions::Vote { term },
+            options: messages::ServerOptions::Vote { term },
         })
-        .await
+        .await?;
+
+        Ok(())
     }
 
     pub async fn send_heartbeat(&self, term: u16) -> Result<(), Error> {
@@ -236,17 +228,17 @@ impl<'a> Replica<'a> {
             None => 0,
         };
 
-        let last_log_index = if self.log.len() > 0 {
+        let last_log_index = if !self.log.is_empty() {
             self.log.len() - 1
         } else {
             // I'm never going to send an append entry if there's nothing in my log
             0
         };
 
-        self.send_msg(&messages::Send {
+        self.send_msg(&messages::ServerMessage {
             body: self.build_body("FFFF", "append_entry"),
-            options: messages::SendOptions::AppendEntry {
-                term: term,
+            options: messages::ServerOptions::AppendEntry {
+                term,
                 leader_id: self.id.to_string(),
                 prev_log_index: last_log_index as u16,
                 prev_log_term: last_log_term,
@@ -255,7 +247,9 @@ impl<'a> Replica<'a> {
                 leader_commit_index: self.commit_index,
             },
         })
-        .await
+        .await?;
+
+        Ok(())
     }
 
     pub fn reset_time_of_last_heartbeat(&mut self) {
@@ -279,7 +273,7 @@ impl<'a> Replica<'a> {
                 }
 
                 // index starts at 0
-                return (self.log.len() - 1) <= other_last_log_index.into();
+                (self.log.len() - 1) <= other_last_log_index.into()
             }
             // If our log is empty, then our last log index is 0, which means
             // everyone is at least as long as us
@@ -288,23 +282,15 @@ impl<'a> Replica<'a> {
     }
 
     pub fn election_timeout_elapsed(&self) -> bool {
-        return self.time_of_last_heartbeat.elapsed() >= self.election_timeout;
+        self.time_of_last_heartbeat.elapsed() >= self.election_timeout
     }
 
     // abstract away sending messages
-    async fn send_msg(&self, msg: &messages::Send) -> Result<(), Error> {
-        let as_bytes: Result<Vec<u8>, serde_json::Error> = serde_json::to_vec(msg);
-
-        let mut buf = match as_bytes {
-            Ok(b) => b,
-            Err(e) => return Err(io::Error::from(e)),
-        };
-
-        let success = self.sock.send(&mut buf).await;
-
-        match success {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+    async fn send_msg<T>(&self, msg: &T) -> Result<usize, Error>
+    where
+        T: Serialize,
+    {
+        let buf: Vec<u8> = serde_json::to_vec(msg)?;
+        self.sock.send(&buf).await
     }
 }

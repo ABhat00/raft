@@ -1,12 +1,12 @@
 use clap::Parser;
-use messages::RecvOptions;
+use messages::ServerOptions;
 use replica::ReplicaState;
 use std::io::Result;
-use std::task::Poll;
 
 mod loggers;
 mod messages;
 mod replica;
+mod timer;
 
 #[derive(Parser)]
 struct Args {
@@ -14,185 +14,115 @@ struct Args {
     replica_ids: Vec<String>,
 }
 
-// What do I have left to do?
-// TODO: Implement Leader Elections
-//   - init replicas with randomized timeouts (Done)
-//   - identify missing leaders (time since last append entry > randomized timeout) (Done)
-//   - start an election - send out a RequestVote RPC to all messages and
-//     transition my state to candidate (Done)
-//   - vote / respond to RequestVote (I vote for anyone as long as their log
-//     is at least as long as mine and I haven't voted for someone in the same term)
-//     (Done)
-//   - If I receive an append entry from an equal or higher term than mine, I transition from
-//     candidate to follower (DONE)
-//   - If I get a majority of votes, transition to state leader and start sending out append entries
-//     (Done)
-
-// TODO 6/7
-// - Fix this to use poll_recv instead of an async timeout (Done) (Kinda?)
-// - Implement append entry - heartbeats, and if I receive an append entry from
-//   a term equal to or higher than mine (AS a candidate),  i switch back to
-//   follower (Done - if the context/ poll recv bullshit wokrs)
-// - Implement the Vote RPC - (Done)
-// - Leader elections still don't work, this is some bullshit
-
-// Next Milestone - Log Replication: Still need to break down what this is
-// Here's a rough sketch of how log replication works (written from the leaders POV)
-//
-// 1. Each time I (the leader) get a put request, I send an append entry to all
-//    of my followers. The append entry contains the index and term of the last
-//    last log entry that I think we (unique for each leader/replica pair) agree
-//    on. I track this "match index" for each replica (init to the last index)
-//    when I get elected
-//
-// 2. If the replica's log agrees with my index and term, it will append everything
-//    I give it to the log starting at the last index we agree upon OVERWRITING
-//    ANYTHING THAT MAY EXIST AT THOSE LOCATIONS. It will then send me an AppendEntryResult{TRUE}
-//    and I can update the "match index" to be the length of my log
-//    (I know we must match up to the last element I just sent), and the next index
-//    to be the same
-//
-//    If it any point there exists an N (N is a log index) such that a majority of the servers
-//    have match index > N  (and N is greater than the commit_index and the term
-//    at entry N is the current term), set commit_index to N and commit everything
-//    up to that point
-//
-// 3. If the replica's log DISAGREES with my index and term, decrement next_index,
-//    and retry with one less matching element. Once I find the term we agree upon,
-//    I send the whole set of entries, and overwrite everything the replica currently has
-//    that doesn't match with us
-//
+// things i need to do to get this to work:
+/*
+    1. fix the timer. Let's run this on a separate thread, then have a channel shared to notify the replica. Then test leader elections and make sure that a simple test
+       case is working properly
+    2. create separate polling functions for leader, follower, and candidate. These state's mean different things, so the replicas should use different functions
+    3. implement log replication - notes above.
+    4. actually respect
+*/
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let mut m = replica::new(&args.machine_id, &args.replica_ids).await?;
+    let mut m = replica::new(&args.machine_id, &args.replica_ids).await;
 
+    // computed by the orchestrator - needs to be passed into the replica
     let required_vote_threshold: u16 = ((m.colleagues.len() / 2) + 1).try_into().unwrap();
+
     loop {
-        let attempt_read = m.read().await;
+        let message = m.read().await;
+        let body = message.body;
 
-        // This timeout could cause problems - it resets if we get any message,
-        // not just messages from the leader. This means that illegitimate leaders
-        // and clients can send us messages, and the timeout will reset. Could lock us here.
-
-        // the leader could also miss a heartbeat b/c a message was redirected from a follower
-
-        // We need to find a way to make sure that the timeout only resets on
-        // appendEntry messages from the actual leader
-
-        // I think I need to rewrite this to use poll_recv, but I should look into it more
-
-        // Hopefully this works? I rewrote it to use poll_recv - the only issue is that
-        // I'm not sure how to construct the context.  I'm currently using a
-        //  no-op context. The idea is that I'm polling in a loop anyways, so I
-        // don't need a waker to wake up the task - I can just drop the task
-        // and it should get cleaned up on its own
-        //
-        // Ok so the polling seems to work - everything else is broken. Progress!
-        match attempt_read {
-            Poll::Ready(recv_msg) => {
-                let body = recv_msg.body;
-
-                match recv_msg.options {
-                    RecvOptions::Put { key, value } => {
-                        if m.is_leader() {
-                            match m.commit(key, value) {
-                                Some(_) => m.send_ok(&body.src, &body.mid).await?,
-                                None => m.send_fail(&body.src, &body.mid).await?,
-                            }
-                        } else {
-                            // We don't redirect to the leader, we redirect to
-                            // the client
-                            m.redirect(&body.src, &body.mid).await?;
-                        }
+        match message.options {
+            ServerOptions::Put { key, value } => {
+                if m.is_leader() {
+                    // not doing any sort of consensus work here
+                    // this should write to the log, and then send an append entries
+                    // once we get a sufficient number of agreements from replicas
+                    match m.commit(key, value) {
+                        Some(_) => m.send_ok(&body.src, &body.mid).await?,
+                        None => m.send_fail(&body.src, &body.mid).await?,
                     }
-                    RecvOptions::Get { key } => {
-                        // m.logger.log(format!("leader is {} ", m.leader));
-                        if m.is_leader() {
-                            m.get(&key, &body.src, &body.mid).await?;
-                        } else {
-                            m.redirect(&body.src, &body.mid).await?;
-                        }
-                    }
-                    RecvOptions::RequestVote {
-                        term,
-                        last_log_index,
-                        last_log_term,
-                    } => {
-                        // See if we should vote
-                        if !m.vote_history.contains(&term)
-                            && m.as_least_as_long(last_log_index, last_log_term)
-                        {
-                            m.logger
-                                .log(format!("voting for {} in term {}", &body.src, term));
-                            m.vote(&body.src, term).await?
-                        }
-                    }
-                    RecvOptions::Vote { term } => {
-                        if matches!(m.state, ReplicaState::Candidate) && term == m.term {
-                            // 1. tally the vote (this key should already exist in the map because I voted for myself)
-                            let num_votes_in_term = m.vote_tally.entry(term).or_insert(1);
-
-                            *num_votes_in_term += 1;
-
-                            // 2. see if we're the leader yet
-                            if *num_votes_in_term >= required_vote_threshold {
-                                // 3. Change our status to leader
-                                m.state = ReplicaState::Leader;
-                                m.leader = m.id.to_string();
-
-                                m.logger.log(format!(
-                                    "{} is the leader, in term {}, with {} votes",
-                                    m.id, m.term, *num_votes_in_term
-                                ));
-
-                                // 4. Send an append entry
-                                m.reset_time_of_last_heartbeat();
-                                m.send_heartbeat(term).await?;
-                            }
-                        }
-                    }
-                    RecvOptions::AppendEntry {
-                        term,
-                        leader_id,
-                        prev_log_index,
-                        prev_log_term,
-                        entries,
-                        leader_commit_index,
-                    } => {
-                        if leader_id == m.leader {
-                            m.reset_time_of_last_heartbeat();
-                        } else if m.should_accept_leader(term) {
-                            m.logger.log(format!(
-                                "{} accepting leader {} in term {}",
-                                m.id, leader_id, term
-                            ));
-                            m.state = ReplicaState::Follower;
-                            m.leader = leader_id;
-                            m.term = term;
-                        }
-                    }
-                    RecvOptions::AppendEntryResult { term, success } => {}
+                } else {
+                    // We don't redirect to the leader, we redirect to
+                    // the client
+                    m.redirect(&body.src, &body.mid).await?;
                 }
             }
-            // We haven't received a message in {election_timeout} milliseconds
-            // Right now this tells us that we haven't received any message -
-            // it should tell us if we haven't received a message from the leader
-            // nbd - just reset the timeout only on messages from the leader
-            Poll::Pending => {
-                if m.election_timeout_elapsed() {
-                    if m.is_leader() {
-                        // send heartbeat
+            ServerOptions::Get { key } => {
+                // m.logger.log(format!("leader is {} ", m.leader));
+                if m.is_leader() {
+                    m.get(&key, &body.src, &body.mid).await?;
+                } else {
+                    m.redirect(&body.src, &body.mid).await?;
+                }
+            }
+            ServerOptions::RequestVote {
+                term,
+                last_log_index,
+                last_log_term,
+            } => {
+                // See if we should vote
+                if !m.vote_history.contains(&term)
+                    && m.as_least_as_long(last_log_index, last_log_term)
+                {
+                    m.logger
+                        .log(format!("voting for {} in term {}", &body.src, term))
+                        .unwrap();
+                    m.vote(&body.src, term).await?
+                }
+            }
+            ServerOptions::Vote { term } => {
+                if matches!(m.state, ReplicaState::Candidate) && term == m.term {
+                    // 1. tally the vote (this key should already exist in the map because I voted for myself)
+                    let num_votes_in_term = m.vote_tally.entry(term).or_insert(1);
+
+                    *num_votes_in_term += 1;
+
+                    // 2. see if we're the leader yet
+                    if *num_votes_in_term >= required_vote_threshold {
+                        // 3. Change our status to leader
+                        m.state = ReplicaState::Leader;
+                        m.leader = m.id.to_string();
+
+                        m.logger
+                            .log(format!(
+                                "{} is the leader, in term {}, with {} votes",
+                                m.id, m.term, *num_votes_in_term
+                            ))
+                            .unwrap();
+
+                        // 4. Send an append entry
                         m.reset_time_of_last_heartbeat();
-                        m.send_heartbeat(m.term).await?;
-                    } else {
-                        if let Err(x) = m.start_election().await {
-                            panic!("{:?}: Unrecoverable failure starting elections", x)
-                        }
+                        m.send_heartbeat(term).await?;
                     }
                 }
             }
+            ServerOptions::AppendEntry {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit_index,
+            } => {
+                if leader_id == m.leader {
+                    m.reset_time_of_last_heartbeat();
+                } else if m.should_accept_leader(term) {
+                    m.logger
+                        .log(format!(
+                            "{} accepting leader {} in term {}",
+                            m.id, leader_id, term
+                        ))
+                        .unwrap();
+                    m.state = ReplicaState::Follower;
+                    m.leader = leader_id;
+                    m.term = term;
+                }
+            }
+            ServerOptions::AppendEntryResult { term, success } => {}
         }
     }
 
