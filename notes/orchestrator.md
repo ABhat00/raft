@@ -90,10 +90,10 @@ ok here's the plan. We're going to
         }
 
         trait Orchestrator {
-            pub fn run_orchestrator(num_replicas: i32) -> (RaftOrchestrator, Vec<ReplicaId>);
-            pub fn get_state(self) -> ClusterState;
-            pub fn send(msg) -> Result<ReplicaResponse, Error>;
-            pub fn kill_replica(replica_id: ReplicaId) -> Result<(), Error>
+            fn run_orchestrator(num_replicas: i32) -> (RaftOrchestrator, Vec<ReplicaId>);
+            fn get_state(self) -> ClusterState;
+            fn send(msg) -> Result<ReplicaResponse, Error>;
+            fn kill_replica(replica_id: ReplicaId) -> Result<(), Error>
         }
       ```
 

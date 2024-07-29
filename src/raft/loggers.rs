@@ -28,3 +28,14 @@ impl Logger for FileLogger {
         writeln!(self.file, "{}", to_write)
     }
 }
+
+#[derive(Default)]
+pub struct MemLogger {
+    events: Vec<String>,
+}
+
+impl Logger for MemLogger {
+    fn log(&mut self, to_write: String) -> Result<()> {
+        Ok(self.events.push(format!("{}", to_write)))
+    }
+}
