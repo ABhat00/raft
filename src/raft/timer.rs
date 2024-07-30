@@ -2,13 +2,14 @@ use crossbeam::channel::{bounded, Receiver};
 use std::{thread, time::Duration};
 
 pub struct Timer {
-    rx: Receiver<()>,
+    pub rx: Receiver<()>,
     timeout: Duration,
 }
-// borrowed from little-raft
+// timing strategy borrowed from little-raft
 /*
-basically the way this works is it puts the timer
+ basically the way this works is it puts the timer
  on a separate thread and then turns the main event loop into a select loop
+ between the timer channel and the message channel
 */
 impl Timer {
     pub fn new(timeout: Duration) -> Self {
@@ -18,8 +19,13 @@ impl Timer {
         }
     }
 
-    pub fn renew(&mut self) {
+    // I need to call reset on this every time a replica gets a heartbeat
+    pub fn reset(&mut self) {
         self.rx = Timer::get_timeout_channel(self.timeout);
+    }
+
+    pub fn get_rx(&self) -> &Receiver<()> {
+        &self.rx
     }
 
     fn get_timeout_channel(timeout: Duration) -> Receiver<()> {

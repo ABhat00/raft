@@ -1,7 +1,5 @@
-use crate::loggers;
-use crate::messages;
-use rand::prelude::thread_rng;
-use rand::Rng;
+use crossbeam::select;
+use crossbeam_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -9,33 +7,41 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::io::{self};
-use tokio_seqpacket::UnixSeqpacket;
+
+use super::{
+    loggers,
+    messages::{
+        self,
+        replica_messages::{RaftReceive, RaftSend},
+    },
+    orchestrator::MessageDestination,
+    timer::Timer,
+    RaftError,
+};
 
 pub struct Replica<'a> {
     // values from the log up to this point have been committed (persisted)
-    pub commit_index: u16,
-
+    commit_index: u16,
+    response_tx: Sender<(RaftSend, MessageDestination)>,
+    message_rx: Receiver<RaftReceive>,
+    timer: Timer,
     // these are the values that are persisted
     committed_values: HashMap<String, String>,
-    pub id: &'a String,
-    pub sock: UnixSeqpacket,
-    // This is the time of the last append entry we've received - every time I get
-    // an append entry message, I reset the time_of_last_heartbeat to SystemTime::now
-    // If  self.time_of_last_heartbeat.elapsed(election_timeout)> election_timeout, we need to do something
-    pub time_of_last_heartbeat: Instant,
-    pub colleagues: &'a Vec<String>,
-    pub state: ReplicaState,
-    pub leader: String,
-    pub term: u16,
-    pub log: Vec<LogEntry>,
-    pub election_timeout: Duration,
-    pub last_applied: u16,
+    id: &'a str,
+
+    colleagues: &'a Vec<String>,
+    state: ReplicaState,
+    leader: String,
+    term: u16,
+    log: Vec<LogEntry>,
+    last_applied: u16,
+
     // if an entry exists in the vote_history, then this replica has
     // already voted for someone in that term
-    pub vote_history: HashSet<u16>,
+    vote_history: HashSet<u16>,
     // how many people have voted for me in each term?
-    pub vote_tally: HashMap<u16, u16>,
-    pub logger: Box<dyn loggers::Logger>,
+    vote_tally: HashMap<u16, u16>,
+    logger: Box<dyn loggers::Logger>,
 }
 
 #[derive(PartialEq)]
@@ -45,37 +51,6 @@ pub enum ReplicaState {
     Candidate,
 }
 
-pub async fn new<'a>(replica_id: &'a String, colleague_ids: &'a Vec<String>) -> Replica<'a> {
-    // this needs to move out into the orchestrator layer - this is going to get replaced with a send and receive channel
-    let sock = UnixSeqpacket::connect(replica_id).await.unwrap();
-    let mut rng = thread_rng();
-    // don't need this either
-    let ms: u64 = rng.gen_range(150..=300);
-
-    Replica {
-        // or this
-        time_of_last_heartbeat: Instant::now(),
-        vote_tally: HashMap::new(),
-        vote_history: HashSet::new(),
-        // election timeout in milliseconds
-        election_timeout: Duration::from_millis(ms),
-        log: Vec::new(),
-        committed_values: HashMap::new(),
-        id: replica_id,
-        sock,
-        colleagues: colleague_ids,
-        state: ReplicaState::Follower,
-        leader: "FFFF".to_string(),
-        term: 0,
-        commit_index: 0,
-        last_applied: 0,
-        logger: Box::new(loggers::new_file_logger(format!(
-            "/var/logs/{}",
-            replica_id
-        ))),
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct LogEntry {
     term: u16,
@@ -83,13 +58,58 @@ pub struct LogEntry {
     value: String,
 }
 
-pub enum RaftError {}
+pub trait RaftReplica<'a> {
+    async fn new(
+        replica_id: &'a str,
+        colleague_ids: &'a Vec<String>,
+        election_timeout: Duration,
+        tx: Sender<(RaftSend, MessageDestination)>,
+        rx: Receiver<RaftReceive>,
+    ) -> Self;
 
-impl<'a> Replica<'a> {
-    pub fn start_replica() -> Result<(), RaftError> {
-        Ok(())
+    async fn run_replica(&mut self) -> Result<(), RaftError>;
+}
+
+impl<'a> RaftReplica<'a> for Replica<'a> {
+    async fn new(
+        replica_id: &'a str,
+        colleague_ids: &'a Vec<String>,
+        election_timeout: Duration,
+        tx: Sender<(RaftSend, MessageDestination)>,
+        rx: Receiver<RaftReceive>,
+    ) -> Replica<'a> {
+        Replica {
+            timer: Timer::new(election_timeout),
+            vote_tally: HashMap::new(),
+            vote_history: HashSet::new(),
+            response_tx: tx,
+            message_rx: rx,
+            log: Vec::new(),
+            committed_values: HashMap::new(),
+            id: replica_id,
+            colleagues: colleague_ids,
+            state: ReplicaState::Follower,
+            leader: "FFFF".to_string(),
+            term: 0,
+            commit_index: 0,
+            last_applied: 0,
+            logger: Box::new(loggers::new_file_logger(format!("logs/{}", replica_id))),
+        }
     }
 
+    async fn run_replica(&mut self) -> Result<(), RaftError> {
+        loop {
+            select! {
+                // if we get a message, handle it
+                recv(self.message_rx) -> msg => (),
+                // if we get a message from the
+                recv(self.timer.get_rx()) -> msg => ()
+            }
+        }
+    }
+}
+
+impl<'a> Replica<'a> {
     pub fn is_leader(&self) -> bool {
         matches!(self.state, ReplicaState::Leader)
     }
@@ -279,10 +299,6 @@ impl<'a> Replica<'a> {
             // everyone is at least as long as us
             None => true,
         }
-    }
-
-    pub fn election_timeout_elapsed(&self) -> bool {
-        self.time_of_last_heartbeat.elapsed() >= self.election_timeout
     }
 
     // abstract away sending messages

@@ -1,12 +1,8 @@
 use clap::Parser;
-use messages::ServerOptions;
-use replica::ReplicaState;
+use raft::replica::ReplicaState;
 use std::io::Result;
 
-mod loggers;
-mod messages;
-mod replica;
-mod timer;
+mod raft;
 
 #[derive(Parser)]
 struct Args {
@@ -16,7 +12,8 @@ struct Args {
 
 // things i need to do to get this to work:
 /*
-    1. fix the timer. Let's run this on a separate thread, then have a channel shared to notify the replica. Then test leader elections and make sure that a simple test
+    1. fix the timer. Let's run this on a separate thread, then have a channel shared to notify the replica.
+         Then test leader elections and make sure that a simple test
        case is working properly
     2. create separate polling functions for leader, follower, and candidate. These state's mean different things, so the replicas should use different functions
     3. implement log replication - notes above.
